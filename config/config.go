@@ -109,3 +109,34 @@ func Parse(cfg map[string]string) (Config, error) {
 
 	return config, nil
 }
+
+
+// DestConfig represents configuration needed for Snowflake as a destination.
+type DestConfig struct {
+	// Connection string connection to snowflake DB.
+	// Detail information https://pkg.go.dev/github.com/snowflakedb/gosnowflake@v1.6.9#hdr-Connection_String
+	Connection string `validate:"required"`
+	// Table name.
+	BatchSize int `validate:"gte=1,lte=100000"`
+}
+
+// Parse attempts to parse plugins.Config into a Config struct.
+func ParseDest(cfg map[string]string) (DestConfig, error) {
+	config := DestConfig{
+		Connection:     cfg[KeyConnection],
+		BatchSize:      defaultBatchSize,
+	}
+	if cfg[KeyBatchSize] != "" {
+		batchSize, err := strconv.Atoi(cfg[KeyBatchSize])
+		if err != nil {
+			return DestConfig{}, errors.New(`"batchSize" config value must be int`)
+		}
+
+		config.BatchSize = batchSize
+	}
+	if err := Validate(&config); err != nil {
+		return DestConfig{}, fmt.Errorf("validate config: %w", err)
+	}
+
+	return config, nil
+}
