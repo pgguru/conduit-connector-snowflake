@@ -16,6 +16,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 	"strings"
@@ -271,6 +272,16 @@ func (s *Snowflake) GetPrimaryKeys(ctx context.Context, table string) ([]string,
 	}
 
 	return columns, nil
+}
+
+// Return dbx query results on underlying connection
+func (s *Snowflake) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return s.conn.QueryContext(ctx, query, args...)
+}
+
+// Return dbx query results on underlying connection
+func (s *Snowflake) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return s.conn.ExecContext(ctx, query, args...)
 }
 
 func buildGetTrackingData(table string, fields []string, offset, limit int) string {
