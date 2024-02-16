@@ -289,6 +289,23 @@ func (s *Snowflake) ExecContext(ctx context.Context, query string, args ...any) 
 	return s.conn.ExecContext(ctx, query, args...)
 }
 
+// Run a user-func in a transaction, pass in the context; if we return an error then rollback
+func (s *Snowflake) InTx(ctx context.Context, f func(*sql.Tx) error) error {
+	tx, err := s.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+
+	defer tx.Rollback() // nolint:errcheck,nolintlint
+
+	err = f(tx)
+
+	if err == nil {
+		err = tx.Commit()
+	}
+	return err
+}
+
 func buildGetTrackingData(table string, fields []string, offset, limit int) string {
 	sb := sqlbuilder.NewSelectBuilder()
 	if len(fields) == 0 {
