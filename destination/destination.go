@@ -128,7 +128,7 @@ func (d *Destination) Open(ctx context.Context) error {
 func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, error) {
 	sdk.Logger(ctx).Debug().Msg("Write()")
 	// lazy caching of tables we know about
-	var tablesNeedingInit []string
+	var tablesNeedingInit = make(map[string]struct{})
 
 	// we need to partition these records by table, then for each table we can
 	// do a merge statement to handle all records simultaneously
@@ -144,13 +144,13 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 		tabMap[tab] = append(tabMap[tab], &r)
 
 		if _, found := d.knownTables[tab]; !found {
-			tablesNeedingInit = append(tablesNeedingInit, tab)
+			tablesNeedingInit[tab] = struct{}{}
 		}
 	}
 
 	// check for any currently untracked tables
 	if len(tablesNeedingInit) > 0 {
-		for _, t := range tablesNeedingInit {
+		for t, _ := range tablesNeedingInit {
 			d.initTable(ctx,t)
 		}
 	}
