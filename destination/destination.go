@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/conduitio/conduit-connector-sdk"
 
@@ -35,6 +36,10 @@ type Destination struct {
 	snowflake *repository.Snowflake
 	// known table mappings
 	knownTables    map[string]*TableInfo
+	// size of per-table batches
+	batchSize int
+	// length of per-table sync interval
+	interval time.Duration
 }
 
 // stored struct for a single table
@@ -49,11 +54,21 @@ type TableInfo struct {
 	mergeQuery string
 	// stage table name
 	stageName string
+	// how many records since last sync
+	count int
+	// sync channel
+	sync chan struct {}
 }
 
 // New initialises a new destination.
 func New() sdk.Destination {
-	return &Destination{}
+	d := &Destination{
+		knownTables: make(map[string]*TableInfo),
+		batchSize: 1000,
+		interval: time.Second * 5,
+	}
+	return d
+	// return sdk.DestinationWithMiddleware(d, sdk.DefaultDestinationMiddleware()...)
 }
 
 // Parameters returns a map of named sdk.Parameters that describe how to configure the Destination.
@@ -69,6 +84,16 @@ func (d *Destination) Parameters() map[string]sdk.Parameter {
 			Required:    false,
 			Description: "Size of batch",
 		},
+		// "sdk.batch.size": {
+		// 	Default: "100",
+		// 	Required: false,
+		// 	Description: "size of batch (sdk)",
+		// },
+		// "sdk.batch.delay": {
+		// 	Default: "1s",
+		// 	Required: false,
+		// 	Description: "update interval",
+		// },
 	}
 }
 
@@ -92,11 +117,13 @@ func (d *Destination) Open(ctx context.Context) error {
 		return fmt.Errorf("error on repo creation: %w", err)
 	}
 	d.snowflake = s
+
 	return nil
 }
 
 // Write a batch of records to snowflake
 func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, error) {
+	sdk.Logger(ctx).Debug().Msg("Write()")
 	// lazy caching of tables we know about
 	var tablesNeedingInit []string
 
@@ -107,7 +134,10 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 
 	// partition each record into per-table batches
 	for _, r := range records {
-		tab := r.Metadata["table"]
+		sdk.Logger(ctx).Debug().Str("meta", fmt.Sprintf("%v",r.Metadata)).Msg("table")
+		tab := r.Metadata["postgres.table"] // this is hard-coded assumption,
+ // which isn't good for general case; if we support more than just postgres as
+ // source then this should be revisited.
 		tabMap[tab] = append(tabMap[tab], &r)
 
 		if _, found := d.knownTables[tab]; !found {
@@ -136,37 +166,67 @@ func (d *Destination) Teardown(ctx context.Context) error {
 }
 
 func (d *Destination) mergeTable(ctx context.Context, tableName string, records []*sdk.Record) {
+	sdk.Logger(ctx).Debug().Str("table",tableName).Msg("mergeTable")
 	ti, found := d.knownTables[tableName]
 
 	if !found {
 		panic(fmt.Sprintf("trying to merge unknown table %v", tableName))
 	}
 
-	// truncate staging table
-	d.snowflake.ExecContext(ctx, `truncate table "%s"`, ti.stageName)
-
 	// load data into the table
 	var b strings.Builder
-	fmt.Fprintf(&b, `INSERT INTO "%s" VALUES `, ti.stageName)
+	fmt.Fprintf(&b, `INSERT INTO %s VALUES `, ti.stageName)
 
 	for i, r := range records {
+		var sd sdk.StructuredData
+
+		if r.Operation == sdk.OperationDelete {
+			sd = r.Key.(sdk.StructuredData)
+		} else {
+			sd = r.Payload.After.(sdk.StructuredData)
+		}
+
 		if i != 0 {
 			b.WriteRune(',')
 		}
 		b.WriteRune('(')
-		fmt.Fprintf(&b, ti.fmtString, r)
+		// field by field values
+		for i, f := range ti.colnames {
+			if i > 0 {
+				b.WriteRune(',')
+			}
+			quote_value(&b, sd[f])
+		}
+		b.WriteRune(',')
+		if r.Operation == sdk.OperationDelete {
+			b.WriteRune('1')
+		} else {
+			b.WriteRune('0')
+		}
+
 		b.WriteRune(')')
 	}
 
-	// our query is now ready, let's run the query to insert into stage table
-	d.snowflake.ExecContext(ctx, b.String())
+	ti.count += len(records)
 
-	// now in the stage table, let's process the batch with the merge query
-	d.snowflake.ExecContext(ctx, ti.mergeQuery)
+	if ti.count > d.batchSize {
+		ti.sync <- struct{}{}
+	}
+
+	sdk.Logger(ctx).Debug().Msg(b.String())
+	// our query is now ready, let's run the query to insert into stage table
+	res, err := d.snowflake.ExecContext(ctx, b.String())
+	if err != nil {
+		sdk.Logger(ctx).Error().Msg(err.Error())
+	}
+	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
 }
 
-// populate our table cache/set for tables we haven't seen before
+// populate our table cache/set for tables we haven't seen before -- this will
+// fork off a new goroutine to handle things, so we might need to change a
+// little of how we handle things if the number of tables is large.
 func (d *Destination) initTable(ctx context.Context, tableName string) {
+	sdk.Logger(ctx).Debug().Str("table",tableName).Msg("initTable")
 	// let's ensure we don't init the table a second time
 	if _, found := d.knownTables[tableName]; found {
 		panic("trying to reinit an already inited table")
@@ -177,7 +237,7 @@ func (d *Destination) initTable(ctx context.Context, tableName string) {
 	info.stageName = fmt.Sprintf("%s_stage", tableName)
 
 	rows, err := d.snowflake.QueryContext(ctx,
-		`SELECT column_name, column_type FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = ?`,
+		`SELECT column_name, data_type FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = ?`,
 		tableName)
 
 	if rows != nil {
@@ -204,11 +264,11 @@ func (d *Destination) initTable(ctx context.Context, tableName string) {
 		}
 		builder.WriteString("'%s'")
 
-		quote_col(updateBuilder, colname)
+		quote_col(&updateBuilder, colname)
 		updateBuilder.WriteRune('=')
-		quote_tablecol(updateBuilder, info.stageName, colname)
+		quote_tablecol(&updateBuilder, info.stageName, colname)
 
-		quote_tablecol(insertBuilder, info.stageName, colname)
+		quote_tablecol(&insertBuilder, info.stageName, colname)
 
 		if strings.ContainsAny(colname, "\"\\") {
 			panic("cannot support column names which need special quoting") // TODO: fix
@@ -230,15 +290,15 @@ func (d *Destination) initTable(ctx context.Context, tableName string) {
 		if i > 0 {
 			keyMatchBuilder.WriteString(" AND ")
 		}
-		quote_tablecol(keyMatchBuilder, tableName, k)
-		updateBuilder.WriteRune('=')
-		quote_tablecol(keyMatchBuilder, info.stageName, k)
+		quote_tablecol(&keyMatchBuilder, tableName, k)
+		keyMatchBuilder.WriteRune('=')
+		quote_tablecol(&keyMatchBuilder, info.stageName, k)
 	}
 
 	// we are not bothering with a builder here since this is one-time setup cost
 	info.mergeQuery = fmt.Sprintf(`
-MERGE INTO "%s" USING "%s" ON %s
-WHEN MATCHED AND "%s" = 'D' THEN DELETE
+MERGE INTO %s USING %s ON %s
+WHEN MATCHED AND %s = 1 THEN DELETE
 WHEN MATCHED THEN UPDATE SET %s
 WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 		tableName,
@@ -248,30 +308,105 @@ WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 		updateBuilder.String(),
 		strings.Join(info.colnames, "\",\""),	// target columns
 		insertBuilder.String())
+	//		info.stageName)
 
 	d.knownTables[tableName] = info
 
-// 	// let's ensure there is a staging table that exists and is loaded and we can merge in the contents
-// 	setup_sql := fmt.Sprintf(`
-// CREATE TEMPORARY TABLE IF NOT EXISTS "%s" AS
-// SELECT * FROM "%s", char(' ') AS operation LIMIT 0
-// `, ti.stageName, tableName)		// TODO: quote
-// 	d.conn.ExecContext(ctx, setup_sql)
+	sdk.Logger(ctx).Debug().Msg(info.mergeQuery)
 
+	// let's ensure there is a staging table that exists and is loaded and we can merge in the contents. TODO: do we need a duplicate index on this one too?
+	setup_sql := fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s AS
+SELECT *, 1 AS cdc_operation FROM %s LIMIT 0
+`, info.stageName, tableName)		// TODO: quote
+
+	sdk.Logger(ctx).Debug().Msg(setup_sql)
+
+	res, err := d.snowflake.ExecContext(ctx, setup_sql)
+	if err != nil {
+		sdk.Logger(ctx).Error().Msg(err.Error())
+	}
+	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
+
+	info.sync = make(chan struct{})
+
+	// launch our worker
+	info.startWorker(ctx, d)
 }
 
 // utility to double-quote a single-col identifier
-func quote_col(b strings.Builder, s string) {
+func quote_col(b *strings.Builder, s string) {
 	b.WriteRune('"')
 	b.WriteString(s)
 	b.WriteRune('"')
 }
 
 // utility to double-quote and join a table/column
-func quote_tablecol(b strings.Builder, s1, s2 string) {
-	b.WriteRune('"')
+func quote_tablecol(b *strings.Builder, s1, s2 string) {
+	// b.WriteRune('"')
 	b.WriteString(s1)
-	b.WriteString("\".\"")
+	// b.WriteString("\".\"")
+	b.WriteString(".\"")
 	b.WriteString(s2)
 	b.WriteRune('"')
+}
+
+// utility to quote a value into a builder
+func quote_value(b *strings.Builder, s any) {
+	switch v := s.(type) {
+	case string:
+		b.WriteRune('\'')
+		for _, c := range v {
+			b.WriteRune(c)
+			if c == '\'' {
+				b.WriteRune(c)		// double single quotes
+			}
+		}
+		b.WriteRune('\'')
+	default:
+		if v == nil {
+			b.WriteString("NULL")
+		} else {
+			fmt.Fprintf(b, "%v", v)
+		}
+	}
+}
+
+// for a given worker, launch the table helper
+func (t *TableInfo) startWorker(ctx context.Context, d *Destination) {
+	timer := time.NewTimer(d.interval)
+	go func() {
+		for {
+			select {
+			case <-t.sync:
+				sdk.Logger(ctx).Info().Msg("MANUAL SYNC")
+				t.processBatch(ctx, d)
+				timer.Reset(d.interval)
+			case <-timer.C:
+				sdk.Logger(ctx).Info().Msg("TIMER FIRED")
+				t.processBatch(ctx, d)
+				timer.Reset(d.interval)
+			}
+		}
+	}()
+}
+
+// process our batch of records
+func (ti *TableInfo) processBatch(ctx context.Context, d *Destination) {
+	if ti.count > 0 {
+		// now in the stage table, let's process the batch with the merge query
+		res, err := d.snowflake.ExecContext(ctx, ti.mergeQuery)
+		if err != nil {
+			sdk.Logger(ctx).Error().Msg(err.Error())
+		}
+		sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
+
+		// finally truncate staging table
+		res, err = d.snowflake.ExecContext(ctx, fmt.Sprintf(`truncate table %s`, ti.stageName))
+		if err != nil {
+			sdk.Logger(ctx).Error().Msg(err.Error())
+		}
+		sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
+		ti.count = 0
+	}
 }
