@@ -126,7 +126,7 @@ func (d *Destination) Open(ctx context.Context) error {
 
 // Write a batch of records to snowflake
 func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, error) {
-	sdk.Logger(ctx).Debug().Msg("Write()")
+	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("Write() %d records", len(records)))
 	// lazy caching of tables we know about
 	var tablesNeedingInit = make(map[string]struct{})
 
@@ -137,7 +137,6 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 
 	// partition each record into per-table batches
 	for _, r := range records {
-		sdk.Logger(ctx).Debug().Str("meta", fmt.Sprintf("%v",r.Metadata)).Msg("table")
 		tab := r.Metadata["postgres.table"] // this is hard-coded assumption,
  // which isn't good for general case; if we support more than just postgres as
  // source then this should be revisited.
@@ -170,7 +169,6 @@ func (d *Destination) Teardown(ctx context.Context) error {
 }
 
 func (d *Destination) mergeTable(ctx context.Context, tableName string, records []*sdk.Record) {
-	sdk.Logger(ctx).Debug().Str("table",tableName).Msg("mergeTable")
 	ti, found := d.knownTables[tableName]
 
 	if !found {
@@ -179,10 +177,6 @@ func (d *Destination) mergeTable(ctx context.Context, tableName string, records 
 
 	// include space for the operation column
 	cols := make([]any, len(ti.colnames) + 1)
-
-	// load data into the table
-	var b strings.Builder
-	fmt.Fprintf(&b, `INSERT INTO %s VALUES `, ti.stageName)
 
 	for _, r := range records {
 		var sd sdk.StructuredData
@@ -201,7 +195,10 @@ func (d *Destination) mergeTable(ctx context.Context, tableName string, records 
 		} else {
 			cols[len(cols) - 1] = 0
 		}
-		ti.insStmt.Exec(cols...)
+		_, err := ti.insStmt.Exec(cols...)
+		if err != nil {
+			sdk.Logger(ctx).Error().Str("error",err.Error()).Msg("error on insert")
+		}
 	}
 }
 
@@ -209,7 +206,6 @@ func (d *Destination) mergeTable(ctx context.Context, tableName string, records 
 // fork off a new goroutine to handle things, so we might need to change a
 // little of how we handle things if the number of tables is large.
 func (d *Destination) initTable(ctx context.Context, tableName string) {
-	sdk.Logger(ctx).Debug().Str("table",tableName).Msg("initTable")
 	// let's ensure we don't init the table a second time
 	if _, found := d.knownTables[tableName]; found {
 		panic("trying to reinit an already inited table")
@@ -294,7 +290,7 @@ WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 	//		info.stageName)
 
 	insQuery := fmt.Sprintf(`
-INSERT INTO %s ("%s","cdc_operation") VALUES (%s)`,
+INSERT INTO %s ("%s",cdc_operation) VALUES (%s)`,
 		info.stageName,
 		strings.Join(info.colnames, "\",\""),	// target columns
 		bindCount(len(info.colnames) + 1),// bindList
@@ -303,22 +299,16 @@ INSERT INTO %s ("%s","cdc_operation") VALUES (%s)`,
 	info.insStmt, err = d.snowflake.PrepareContext(ctx, insQuery)
 	d.knownTables[tableName] = info
 
-	sdk.Logger(ctx).Debug().Msg(info.mergeQuery)
-
 	// let's ensure there is a staging table that exists and is loaded and we can merge in the contents. TODO: do we need a duplicate index on this one too?
 	setup_sql := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s AS
 SELECT *, 1 AS cdc_operation FROM %s LIMIT 0
 `, info.stageName, tableName)		// TODO: quote
 
-	sdk.Logger(ctx).Debug().Msg(setup_sql)
-
-	res, err := d.snowflake.ExecContext(ctx, setup_sql)
+	_, err = d.snowflake.ExecContext(ctx, setup_sql)
 	if err != nil {
 		sdk.Logger(ctx).Error().Msg(err.Error())
 	}
-	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
-
 	info.sync = make(chan struct{})
 
 	// launch our worker
@@ -386,18 +376,15 @@ func (t *TableInfo) startWorker(ctx context.Context, d *Destination) {
 func (ti *TableInfo) processBatch(ctx context.Context, d *Destination) {
 	if ti.count > 0 {
 		// now in the stage table, let's process the batch with the merge query
-		res, err := d.snowflake.ExecContext(ctx, ti.mergeQuery)
+		_, err := d.snowflake.ExecContext(ctx, ti.mergeQuery)
 		if err != nil {
 			sdk.Logger(ctx).Error().Msg(err.Error())
 		}
-		sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
-
 		// finally truncate staging table
-		res, err = d.snowflake.ExecContext(ctx, fmt.Sprintf(`truncate table %s`, ti.stageName))
+		_, err = d.snowflake.ExecContext(ctx, fmt.Sprintf(`truncate table %s`, ti.stageName))
 		if err != nil {
 			sdk.Logger(ctx).Error().Msg(err.Error())
 		}
-		sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
 		ti.count = 0
 	}
 }
