@@ -70,8 +70,8 @@ func New() sdk.Destination {
 		batchSize: 1000,
 		interval: time.Second * 5,
 	}
-	return d
-	// return sdk.DestinationWithMiddleware(d, sdk.DefaultDestinationMiddleware()...)
+	//return d
+	return sdk.DestinationWithMiddleware(d, sdk.DefaultDestinationMiddleware()...)
 }
 
 // Parameters returns a map of named sdk.Parameters that describe how to configure the Destination.
