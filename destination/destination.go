@@ -16,6 +16,7 @@ package destination
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -58,6 +59,8 @@ type TableInfo struct {
 	count int
 	// sync channel
 	sync chan struct {}
+	// prepared statement for insert
+	insStmt *sql.Stmt
 }
 
 // New initialises a new destination.
@@ -162,6 +165,7 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 
 // Teardown gracefully shutdown connector.
 func (d *Destination) Teardown(ctx context.Context) error {
+	// cancel our prepared statements, etc
 	return nil
 }
 
@@ -173,11 +177,14 @@ func (d *Destination) mergeTable(ctx context.Context, tableName string, records 
 		panic(fmt.Sprintf("trying to merge unknown table %v", tableName))
 	}
 
+	// include space for the operation column
+	cols := make([]any, len(ti.colnames) + 1)
+
 	// load data into the table
 	var b strings.Builder
 	fmt.Fprintf(&b, `INSERT INTO %s VALUES `, ti.stageName)
 
-	for i, r := range records {
+	for _, r := range records {
 		var sd sdk.StructuredData
 
 		if r.Operation == sdk.OperationDelete {
@@ -186,40 +193,16 @@ func (d *Destination) mergeTable(ctx context.Context, tableName string, records 
 			sd = r.Payload.After.(sdk.StructuredData)
 		}
 
-		if i != 0 {
-			b.WriteRune(',')
-		}
-		b.WriteRune('(')
-		// field by field values
 		for i, f := range ti.colnames {
-			if i > 0 {
-				b.WriteRune(',')
-			}
-			quote_value(&b, sd[f])
+			cols[i] = sd[f]
 		}
-		b.WriteRune(',')
 		if r.Operation == sdk.OperationDelete {
-			b.WriteRune('1')
+			cols[len(cols) - 1] = 1
 		} else {
-			b.WriteRune('0')
+			cols[len(cols) - 1] = 0
 		}
-
-		b.WriteRune(')')
+		ti.insStmt.Exec(cols...)
 	}
-
-	ti.count += len(records)
-
-	if ti.count > d.batchSize {
-		ti.sync <- struct{}{}
-	}
-
-	sdk.Logger(ctx).Debug().Msg(b.String())
-	// our query is now ready, let's run the query to insert into stage table
-	res, err := d.snowflake.ExecContext(ctx, b.String())
-	if err != nil {
-		sdk.Logger(ctx).Error().Msg(err.Error())
-	}
-	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
 }
 
 // populate our table cache/set for tables we haven't seen before -- this will
@@ -310,6 +293,14 @@ WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 		insertBuilder.String())
 	//		info.stageName)
 
+	insQuery := fmt.Sprintf(`
+INSERT INTO %s ("%s","cdc_operation") VALUES (%s)`,
+		info.stageName,
+		strings.Join(info.colnames, "\",\""),	// target columns
+		bindCount(len(info.colnames) + 1),// bindList
+	)
+	sdk.Logger(ctx).Info().Msg(insQuery)
+	info.insStmt, err = d.snowflake.PrepareContext(ctx, insQuery)
 	d.knownTables[tableName] = info
 
 	sdk.Logger(ctx).Debug().Msg(info.mergeQuery)
@@ -409,4 +400,18 @@ func (ti *TableInfo) processBatch(ctx context.Context, d *Destination) {
 		sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("%v",res))
 		ti.count = 0
 	}
+}
+
+func bindCount(n int) string {
+	if n <= 0 {
+        return ""
+    }
+    var builder strings.Builder
+    for i := 0; i < n; i++ {
+        if i > 0 {
+            builder.WriteString(",")
+        }
+        builder.WriteString("?")
+    }
+    return builder.String()
 }

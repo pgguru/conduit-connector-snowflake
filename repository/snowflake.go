@@ -221,6 +221,11 @@ func (s *Snowflake) GetTrackingData(
 	return result, nil
 }
 
+// Return a prepared statement
+func (s *Snowflake) PrepareContext(ctx context.Context, theSql string) (*sql.Stmt, error){
+	return s.conn.PrepareContext(ctx, theSql)
+}
+
 // TableExists check if table exist.
 func (s *Snowflake) TableExists(ctx context.Context, table string) (bool, error) {
 	rows, err := s.conn.QueryContext(ctx, fmt.Sprintf(queryIsTableExist, strings.ToUpper(table)))
