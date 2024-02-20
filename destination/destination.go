@@ -16,7 +16,6 @@ package destination
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -59,18 +58,17 @@ type TableInfo struct {
 	count int
 	// sync channel
 	sync chan struct {}
-	// prepared statement for insert
-	insStmt *sql.Stmt
+	// our builder
+	insBuilder *strings.Builder
 }
 
 // New initialises a new destination.
 func New() sdk.Destination {
 	d := &Destination{
 		knownTables: make(map[string]*TableInfo),
-		batchSize: 1000,
-		interval: time.Second * 5,
+		batchSize: 5000,		// how many rows (per table) to insert into staging table
+		interval: time.Minute,	// how frequently (per table) to merge the staging table into the main one
 	}
-	//return d
 	return sdk.DestinationWithMiddleware(d, sdk.DefaultDestinationMiddleware()...)
 }
 
@@ -87,16 +85,6 @@ func (d *Destination) Parameters() map[string]sdk.Parameter {
 			Required:    false,
 			Description: "Size of batch",
 		},
-		// "sdk.batch.size": {
-		// 	Default: "100",
-		// 	Required: false,
-		// 	Description: "size of batch (sdk)",
-		// },
-		// "sdk.batch.delay": {
-		// 	Default: "1s",
-		// 	Required: false,
-		// 	Description: "update interval",
-		// },
 	}
 }
 
@@ -127,78 +115,83 @@ func (d *Destination) Open(ctx context.Context) error {
 // Write a batch of records to snowflake
 func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, error) {
 	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("Write() %d records", len(records)))
-	// lazy caching of tables we know about
-	var tablesNeedingInit = make(map[string]struct{})
-
 	// we need to partition these records by table, then for each table we can
 	// do a merge statement to handle all records simultaneously
-
-	tabMap := make(map[string][]*sdk.Record)
 
 	// partition each record into per-table batches
 	for _, r := range records {
 		tab := r.Metadata["postgres.table"] // this is hard-coded assumption,
- // which isn't good for general case; if we support more than just postgres as
- // source then this should be revisited.
-		tabMap[tab] = append(tabMap[tab], &r)
+		// which isn't good for general case; if we support more than just
+		// postgres as source then this should be revisited.
 
-		if _, found := d.knownTables[tab]; !found {
-			tablesNeedingInit[tab] = struct{}{}
+		var ti *TableInfo
+		if myti, found := d.knownTables[tab]; !found {
+			d.initTable(ctx, tab)
+			ti = d.knownTables[tab]
+		} else {
+			ti = myti
 		}
-	}
 
-	// check for any currently untracked tables
-	if len(tablesNeedingInit) > 0 {
-		for t, _ := range tablesNeedingInit {
-			d.initTable(ctx,t)
-		}
+		// add our record to the local cache
+		d.addRecord(ctx,ti,&r)
 	}
-
-	// now iterate over our groups to handle a merge for each
-	for t, g := range (tabMap) {
-		d.mergeTable(ctx, t, g)
-	}
-
 	return len(records), nil
 }
 
 // Teardown gracefully shutdown connector.
 func (d *Destination) Teardown(ctx context.Context) error {
-	// cancel our prepared statements, etc
 	return nil
 }
 
-func (d *Destination) mergeTable(ctx context.Context, tableName string, records []*sdk.Record) {
-	ti, found := d.knownTables[tableName]
+func (d *Destination) addRecord(ctx context.Context, ti *TableInfo, r *sdk.Record) {
+	// load data into the table
+	var b = ti.insBuilder
 
-	if !found {
-		panic(fmt.Sprintf("trying to merge unknown table %v", tableName))
+	if b == nil {
+		ti.insBuilder = &strings.Builder{}
+		b = ti.insBuilder
+		b.Grow(200*d.batchSize)			// guess on an average row size; maybe make tunable?
+		// TODO: what happens if we exceed this size? ideally we can grow as we want automatically, maybe double in size if we exceed
+		fmt.Fprintf(b, `INSERT INTO %s ("%s",cdc_operation) VALUES `,
+			ti.stageName,
+			strings.Join(ti.colnames, "\",\""),
+		)
+		ti.count = 0
 	}
 
-	// include space for the operation column
-	cols := make([]any, len(ti.colnames) + 1)
+	var sd sdk.StructuredData
 
-	for _, r := range records {
-		var sd sdk.StructuredData
+	if r.Operation == sdk.OperationDelete {
+		sd = r.Key.(sdk.StructuredData)
+	} else {
+		sd = r.Payload.After.(sdk.StructuredData)
+	}
 
-		if r.Operation == sdk.OperationDelete {
-			sd = r.Key.(sdk.StructuredData)
-		} else {
-			sd = r.Payload.After.(sdk.StructuredData)
+	if ti.count > 0 {
+		b.WriteRune(',')
+	}
+	b.WriteRune('(')
+	// field by field values
+	for i, f := range ti.colnames {
+		if i > 0 {
+			b.WriteRune(',')
 		}
+		quote_value(b, sd[f])
+	}
+	b.WriteRune(',')
+	// set the operation depending on whether we are a delete or not
+	if r.Operation == sdk.OperationDelete {
+		b.WriteRune('1')
+	} else {
+		b.WriteRune('0')
+	}
 
-		for i, f := range ti.colnames {
-			cols[i] = sd[f]
-		}
-		if r.Operation == sdk.OperationDelete {
-			cols[len(cols) - 1] = 1
-		} else {
-			cols[len(cols) - 1] = 0
-		}
-		_, err := ti.insStmt.Exec(cols...)
-		if err != nil {
-			sdk.Logger(ctx).Error().Str("error",err.Error()).Msg("error on insert")
-		}
+	b.WriteRune(')')
+
+	ti.count += 1
+
+	if ti.count >= d.batchSize {
+		ti.sync <- struct{}{}
 	}
 }
 
@@ -217,7 +210,7 @@ func (d *Destination) initTable(ctx context.Context, tableName string) {
 
 	rows, err := d.snowflake.QueryContext(ctx,
 		`SELECT column_name, data_type FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = ?`,
-		tableName)
+		strings.ToUpper(tableName)) // TODO: add check for ToUpper()
 
 	if rows != nil {
 		defer rows.Close()
@@ -289,14 +282,6 @@ WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 		insertBuilder.String())
 	//		info.stageName)
 
-	insQuery := fmt.Sprintf(`
-INSERT INTO %s ("%s",cdc_operation) VALUES (%s)`,
-		info.stageName,
-		strings.Join(info.colnames, "\",\""),	// target columns
-		bindCount(len(info.colnames) + 1),// bindList
-	)
-	sdk.Logger(ctx).Info().Msg(insQuery)
-	info.insStmt, err = d.snowflake.PrepareContext(ctx, insQuery)
 	d.knownTables[tableName] = info
 
 	// let's ensure there is a staging table that exists and is loaded and we can merge in the contents. TODO: do we need a duplicate index on this one too?
@@ -308,6 +293,7 @@ SELECT *, 1 AS cdc_operation FROM %s LIMIT 0
 	_, err = d.snowflake.ExecContext(ctx, setup_sql)
 	if err != nil {
 		sdk.Logger(ctx).Error().Msg(err.Error())
+		sdk.Logger(ctx).Info().Msg(setup_sql)
 	}
 	info.sync = make(chan struct{})
 
@@ -361,11 +347,11 @@ func (t *TableInfo) startWorker(ctx context.Context, d *Destination) {
 			select {
 			case <-t.sync:
 				sdk.Logger(ctx).Info().Msg("MANUAL SYNC")
-				t.processBatch(ctx, d)
+				t.processBatch(ctx, d, true, false)
 				timer.Reset(d.interval)
 			case <-timer.C:
 				sdk.Logger(ctx).Info().Msg("TIMER FIRED")
-				t.processBatch(ctx, d)
+				t.processBatch(ctx, d, true, true)
 				timer.Reset(d.interval)
 			}
 		}
@@ -373,32 +359,28 @@ func (t *TableInfo) startWorker(ctx context.Context, d *Destination) {
 }
 
 // process our batch of records
-func (ti *TableInfo) processBatch(ctx context.Context, d *Destination) {
-	if ti.count > 0 {
+func (ti *TableInfo) processBatch(ctx context.Context, d *Destination, flush, merge bool) {
+	if flush && ti.count > 0 {
+		// our query is now ready, let's run the query to insert into stage table
+		_, err := d.snowflake.ExecContext(ctx, ti.insBuilder.String())
+		if err != nil {
+			sdk.Logger(ctx).Error().Msg(err.Error())
+		}
+		ti.insBuilder = nil
+		ti.count = 0
+	}
+
+	if merge {
 		// now in the stage table, let's process the batch with the merge query
 		_, err := d.snowflake.ExecContext(ctx, ti.mergeQuery)
 		if err != nil {
 			sdk.Logger(ctx).Error().Msg(err.Error())
+			sdk.Logger(ctx).Info().Msg(ti.mergeQuery)
 		}
 		// finally truncate staging table
 		_, err = d.snowflake.ExecContext(ctx, fmt.Sprintf(`truncate table %s`, ti.stageName))
 		if err != nil {
 			sdk.Logger(ctx).Error().Msg(err.Error())
 		}
-		ti.count = 0
 	}
-}
-
-func bindCount(n int) string {
-	if n <= 0 {
-        return ""
-    }
-    var builder strings.Builder
-    for i := 0; i < n; i++ {
-        if i > 0 {
-            builder.WriteString(",")
-        }
-        builder.WriteString("?")
-    }
-    return builder.String()
 }
