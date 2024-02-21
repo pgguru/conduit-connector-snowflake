@@ -17,6 +17,7 @@ package destination
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,8 +59,10 @@ type TableInfo struct {
 	count int
 	// sync channel
 	sync chan struct {}
-	// our builder
+	// our builder for adding records to the stage table
 	insBuilder *strings.Builder
+	// sequence number; monotonic and used for ties for changes on the same row in the same sync period
+	seq int64
 }
 
 // New initialises a new destination.
@@ -152,7 +155,7 @@ func (d *Destination) addRecord(ctx context.Context, ti *TableInfo, r *sdk.Recor
 		b = ti.insBuilder
 		b.Grow(200*d.batchSize)			// guess on an average row size; maybe make tunable?
 		// TODO: what happens if we exceed this size? ideally we can grow as we want automatically, maybe double in size if we exceed
-		fmt.Fprintf(b, `INSERT INTO %s ("%s",cdc_operation) VALUES `,
+		fmt.Fprintf(b, `INSERT INTO %s ("%s",cdc_operation,cdc_serial) VALUES `,
 			ti.stageName,
 			strings.Join(ti.colnames, "\",\""),
 		)
@@ -179,13 +182,20 @@ func (d *Destination) addRecord(ctx context.Context, ti *TableInfo, r *sdk.Recor
 		quote_value(b, sd[f])
 	}
 	b.WriteRune(',')
+
+	// now add our system columns
+
 	// set the operation depending on whether we are a delete or not
 	if r.Operation == sdk.OperationDelete {
 		b.WriteRune('1')
 	} else {
 		b.WriteRune('0')
 	}
+	b.WriteRune(',')
 
+	// increase and append our record seq number
+	ti.seq += 1
+	b.WriteString(strconv.FormatInt(ti.seq, 10))
 	b.WriteRune(')')
 
 	ti.count += 1
@@ -267,18 +277,43 @@ func (d *Destination) initTable(ctx context.Context, tableName string) {
 		quote_tablecol(&keyMatchBuilder, info.stageName, k)
 	}
 
+	colList := strings.Join(info.colnames, "\",\"")
+
+	latestChange := fmt.Sprintf(`
+WITH RankedVersions AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER(PARTITION BY "%s" ORDER BY cdc_serial DESC) AS rn
+  FROM
+    %s
+)
+SELECT
+    "%s",cdc_operation
+FROM
+  RankedVersions
+WHERE
+  rn = 1
+`,
+		strings.Join(keyCols,"\",\""),
+		info.stageName,
+		colList,
+	)
+
+	sdk.Logger(ctx).Info().Msg(latestChange)
+
 	// we are not bothering with a builder here since this is one-time setup cost
 	info.mergeQuery = fmt.Sprintf(`
-MERGE INTO %s USING %s ON %s
+MERGE INTO %s USING (%s) %s ON %s
 WHEN MATCHED AND %s = 1 THEN DELETE
 WHEN MATCHED THEN UPDATE SET %s
 WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 		tableName,
+		latestChange,
 		info.stageName,
 		keyMatchBuilder.String(),
 		operationCol,
 		updateBuilder.String(),
-		strings.Join(info.colnames, "\",\""),	// target columns
+		colList,	// target columns
 		insertBuilder.String())
 	//		info.stageName)
 
@@ -287,7 +322,7 @@ WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 	// let's ensure there is a staging table that exists and is loaded and we can merge in the contents. TODO: do we need a duplicate index on this one too?
 	setup_sql := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s AS
-SELECT *, 1 AS cdc_operation FROM %s LIMIT 0
+SELECT *, 1 AS cdc_operation, 0::bigint as cdc_serial FROM %s LIMIT 0
 `, info.stageName, tableName)		// TODO: quote
 
 	_, err = d.snowflake.ExecContext(ctx, setup_sql)
@@ -297,7 +332,17 @@ SELECT *, 1 AS cdc_operation FROM %s LIMIT 0
 	}
 	info.sync = make(chan struct{})
 
-	// launch our worker
+	// This sequence counter is monotonic and unique for rows added to the
+	// staging table before the flush; each change is added to this counter, so
+	// we'd need to be able to add records faster than a nanosecond in order for
+	// there to be a possiblity of conflict in this table if this table worker
+	// is canceled and restarted.  In all likelihood, this will not be
+	// encountered, so as long as the upstream can store an int64 we should be
+	// fine.
+
+	info.seq = time.Now().UnixNano()
+
+	//launch our worker
 	info.startWorker(ctx, d)
 }
 
