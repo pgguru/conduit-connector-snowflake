@@ -41,6 +41,8 @@ type Destination struct {
 	batchSize int
 	// length of per-table sync interval
 	interval time.Duration
+	// how many manual syncs before we issue a merge on the staging table
+	manualMergeFreq int
 }
 
 // stored struct for a single table
@@ -63,6 +65,8 @@ type TableInfo struct {
 	insBuilder *strings.Builder
 	// sequence number; monotonic and used for ties for changes on the same row in the same sync period
 	seq int64
+	// manual sync counter
+	manualCount int
 }
 
 // New initialises a new destination.
@@ -71,6 +75,7 @@ func New() sdk.Destination {
 		knownTables: make(map[string]*TableInfo),
 		batchSize: 5000,		// how many rows (per table) to insert into staging table
 		interval: time.Minute,	// how frequently (per table) to merge the staging table into the main one
+		manualMergeFreq: 20,	// we can perform this many stage table loads before forcing a merge
 	}
 	return sdk.DestinationWithMiddleware(d, sdk.DefaultDestinationMiddleware()...)
 }
@@ -392,7 +397,12 @@ func (t *TableInfo) startWorker(ctx context.Context, d *Destination) {
 			select {
 			case <-t.sync:
 				sdk.Logger(ctx).Info().Msg("MANUAL SYNC")
-				t.processBatch(ctx, d, true, false)
+				// If a batch is being continuously updated, we'll never hit the
+				// merge and the staging table will grow without bound.  Let's
+				// ensure that there's a threshold to occasionally merge while
+				// still allowing the staging table to grow larger than a single batch
+				t.manualCount += 1
+				t.processBatch(ctx, d, true, t.manualCount % d.manualMergeFreq == 0)
 				timer.Reset(d.interval)
 			case <-timer.C:
 				sdk.Logger(ctx).Info().Msg("TIMER FIRED")
