@@ -21,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goccy/go-json"
+
 	sdk "github.com/conduitio/conduit-connector-sdk"
 
 	"github.com/conduitio-labs/conduit-connector-snowflake/config"
@@ -32,11 +34,11 @@ type Destination struct {
 	// required
 	sdk.UnimplementedDestination
 	// config details
-	config    config.DestConfig
+	config config.DestConfig
 	// snowflake repository
 	snowflake *repository.Snowflake
 	// known table mappings
-	knownTables    map[string]*TableInfo
+	knownTables map[string]*TableInfo
 	// size of per-table batches
 	batchSize int
 	// length of per-table sync interval
@@ -60,7 +62,7 @@ type TableInfo struct {
 	// how many records since last sync
 	count int
 	// sync channel
-	sync chan struct {}
+	sync chan struct{}
 	// our builder for adding records to the stage table
 	insBuilder *strings.Builder
 	// sequence number; monotonic and used for ties for changes on the same row in the same sync period
@@ -72,10 +74,10 @@ type TableInfo struct {
 // New initialises a new destination.
 func New() sdk.Destination {
 	d := &Destination{
-		knownTables: make(map[string]*TableInfo),
-		batchSize: 5000,		// how many rows (per table) to insert into staging table
-		interval: time.Minute,	// how frequently (per table) to merge the staging table into the main one
-		manualMergeFreq: 20,	// we can perform this many stage table loads before forcing a merge
+		knownTables:     make(map[string]*TableInfo),
+		batchSize:       5000,        // how many rows (per table) to insert into staging table
+		interval:        time.Minute, // how frequently (per table) to merge the staging table into the main one
+		manualMergeFreq: 20,          // we can perform this many stage table loads before forcing a merge
 	}
 	return sdk.DestinationWithMiddleware(d, sdk.DefaultDestinationMiddleware()...)
 }
@@ -111,7 +113,7 @@ func (d *Destination) Configure(ctx context.Context, cfgRaw map[string]string) e
 // Open prepare the plugin to start writing records from the given position.
 func (d *Destination) Open(ctx context.Context) error {
 	// Create storage.
-	s, err := repository.Create(ctx,d.config.Connection)
+	s, err := repository.Create(ctx, d.config.Connection)
 	if err != nil {
 		return fmt.Errorf("error on repo creation: %w", err)
 	}
@@ -141,7 +143,7 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 		}
 
 		// add our record to the local cache
-		d.addRecord(ctx,ti,&r)
+		d.addRecord(ctx, ti, &r)
 	}
 	return len(records), nil
 }
@@ -158,7 +160,7 @@ func (d *Destination) addRecord(ctx context.Context, ti *TableInfo, r *sdk.Recor
 	if b == nil {
 		ti.insBuilder = &strings.Builder{}
 		b = ti.insBuilder
-		b.Grow(200*d.batchSize)			// guess on an average row size; maybe make tunable?
+		b.Grow(200 * d.batchSize) // guess on an average row size; maybe make tunable?
 		// TODO: what happens if we exceed this size? ideally we can grow as we want automatically, maybe double in size if we exceed
 		fmt.Fprintf(b, `INSERT INTO %s ("%s",cdc_operation,cdc_serial) VALUES `,
 			ti.stageName,
@@ -299,7 +301,7 @@ FROM
 WHERE
   rn = 1
 `,
-		strings.Join(keyCols,"\",\""),
+		strings.Join(keyCols, "\",\""),
 		info.stageName,
 		colList,
 	)
@@ -318,7 +320,7 @@ WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 		keyMatchBuilder.String(),
 		operationCol,
 		updateBuilder.String(),
-		colList,	// target columns
+		colList, // target columns
 		insertBuilder.String())
 	//		info.stageName)
 
@@ -328,7 +330,7 @@ WHEN NOT MATCHED THEN INSERT ("%s") VALUES (%s)`,
 	setup_sql := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s AS
 SELECT *, 1 AS cdc_operation, 0::bigint as cdc_serial FROM %s LIMIT 0
-`, info.stageName, tableName)		// TODO: quote
+`, info.stageName, tableName) // TODO: quote
 
 	_, err = d.snowflake.ExecContext(ctx, setup_sql)
 	if err != nil {
@@ -371,21 +373,36 @@ func quote_tablecol(b *strings.Builder, s1, s2 string) {
 // utility to quote a value into a builder
 func quote_value(b *strings.Builder, s any) {
 	switch v := s.(type) {
+	case nil:
+		b.WriteString("NULL")
 	case string:
 		b.WriteRune('\'')
 		for _, c := range v {
 			b.WriteRune(c)
 			if c == '\'' {
-				b.WriteRune(c)		// double single quotes
+				b.WriteRune(c) // double single quotes
 			}
 		}
 		b.WriteRune('\'')
-	default:
-		if v == nil {
-			b.WriteString("NULL")
+	case bool:
+		if s == true {
+			b.WriteString("true")
 		} else {
-			fmt.Fprintf(b, "%v", v)
+			b.WriteString("false")
 		}
+	case float64:
+		fmt.Fprintf(b, "%v", s)
+	case []any:
+		// no fallthrough in array type but basically the same thing here, as we aren't sure how to serialize based on just the information in the raw JSON we get
+		data, _ := json.Marshal(s)
+		quote_value(b, string(data))
+	case map[string]any:
+		// json
+		data, _ := json.Marshal(s)
+		quote_value(b, string(data))
+	default:
+		sdk.Logger(context.TODO()).Trace().Msg(fmt.Sprintf("unhandled specific type serialization: %T", s))
+		fmt.Fprintf(b, "%v", s)
 	}
 }
 
@@ -402,7 +419,7 @@ func (t *TableInfo) startWorker(ctx context.Context, d *Destination) {
 				// ensure that there's a threshold to occasionally merge while
 				// still allowing the staging table to grow larger than a single batch
 				t.manualCount += 1
-				t.processBatch(ctx, d, true, t.manualCount % d.manualMergeFreq == 0)
+				t.processBatch(ctx, d, true, t.manualCount%d.manualMergeFreq == 0)
 				timer.Reset(d.interval)
 			case <-timer.C:
 				sdk.Logger(ctx).Info().Msg("TIMER FIRED")
@@ -417,6 +434,7 @@ func (t *TableInfo) startWorker(ctx context.Context, d *Destination) {
 func (ti *TableInfo) processBatch(ctx context.Context, d *Destination, flush, merge bool) {
 	if flush && ti.count > 0 {
 		// our query is now ready, let's run the query to insert into stage table
+		sdk.Logger(ctx).Trace().Msg(ti.insBuilder.String())
 		_, err := d.snowflake.ExecContext(ctx, ti.insBuilder.String())
 		if err != nil {
 			sdk.Logger(ctx).Error().Msg(err.Error())
