@@ -18,7 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	//"strings"
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/conduitio-labs/conduit-connector-snowflake/destination"
@@ -38,7 +38,7 @@ type Destination struct {
 
 func NewDestination() sdk.Destination {
 	d := &Destination{
-		stmtBuilder: sq.StatementBuilder.PlaceholderFormat(sq.Dollar),
+		stmtBuilder: sq.StatementBuilder.PlaceholderFormat(sq.Question),
 	}
 	return sdk.DestinationWithMiddleware(d, sdk.DefaultDestinationMiddleware()...)
 }
@@ -171,6 +171,7 @@ func (d *Destination) upsert(ctx context.Context, r sdk.Record, b *destination.B
 	}
 	sdk.Logger(ctx).Trace().
 		Str("table_name", tableName).
+		Str("query", query).
 		Any("key", map[string]interface{}{keyColumnName: key[keyColumnName]}).
 		Msg("upserting record")
 
@@ -287,20 +288,21 @@ func (d *Destination) formatUpsertQuery(
 	keyColumnName string,
 	tableName string,
 ) (string, []interface{}, error) {
-	upsertQuery := fmt.Sprintf("ON CONFLICT (%s) DO UPDATE SET", keyColumnName)
-	for column := range payload {
-		// tuples form a comma separated list, so they need a comma at the end.
-		// `EXCLUDED` references the new record's values. This will overwrite
-		// every column's value except for the key column.
-		tuple := fmt.Sprintf("%s=EXCLUDED.%s,", column, column)
-		// TODO: Consider removing this space.
-		upsertQuery += " "
-		// add the tuple to the query string
-		upsertQuery += tuple
-	}
+	upsertQuery := ""
+	//upsertQuery := fmt.Sprintf("ON CONFLICT (%s) DO UPDATE SET", keyColumnName)
+	//for column := range payload {
+	//	// tuples form a comma separated list, so they need a comma at the end.
+	//	// `EXCLUDED` references the new record's values. This will overwrite
+	//	// every column's value except for the key column.
+	//	tuple := fmt.Sprintf("%s=EXCLUDED.%s,", column, column)
+	//	// TODO: Consider removing this space.
+	//	upsertQuery += " "
+	//	// add the tuple to the query string
+	//	upsertQuery += tuple
+	//}
 
 	// remove the last comma from the list of tuples
-	upsertQuery = strings.TrimSuffix(upsertQuery, ",")
+	//upsertQuery = strings.TrimSuffix(upsertQuery, ",")
 
 	// we have to manually append a semi colon to the upsert sql;
 	upsertQuery += ";"

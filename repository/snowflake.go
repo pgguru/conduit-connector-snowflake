@@ -391,21 +391,43 @@ func isNil(v interface{}) bool {
 
 func (s *Snowflake) SendBatch(ctx context.Context, batch *destination.Batch) destination.BatchResults {
 	// get ready for handling
-	batch.PrepareBatch()
+	//batch.PrepareBatch()
+	fmt.Printf("XXXX SendBatch")
+
+	errs := make([]error, 0, len(batch.QueuedQueries))
 
 	for _, q := range batch.QueuedQueries {
-		s.ExecContext(ctx, q.SQL, q.Arguments)
+		//var reflectArgs []reflect.Value
+		//reflectArgs = append(reflectArgs, reflect.ValueOf(ctx), reflect.ValueOf(q.SQL))
+		for _, a := range q.Arguments {
+			//_, err := s.ExecContext(ctx, q.SQL, reflectArgs = append(reflectArgs, reflect.ValueOf(a))
+			fmt.Printf("XXXX running query for %v %v", q.SQL, a)
+			_, err := s.ExecContext(ctx, q.SQL, a...)
+			errs = append(errs, err)
+		}
 	}
-	return &batchResults{}
+
+	return &batchResults{Batch:batch, Errs:errs}
 }
 
 type batchResults struct {
+	Batch *destination.Batch
+	Errs []error
 }
 
 func (br *batchResults) Close() error {
+	print("XXXXXX CALLED CLOSE")
+	for _, err := range br.Errs {
+		if err != nil {
+			print(err)
+		}
+	}
 	return nil
 }
 
 func (br *batchResults) Exec() error {
+	print("XXXXXX CALLED EXEC\n")
+	print(br)
+	fmt.Printf("Batch Results: %+v\n", br)
 	return nil
 }
