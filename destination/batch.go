@@ -21,7 +21,7 @@ type Batch struct {
 // prepared statement.  If the statement matches the last one, we append the
 // arguments list to this one instead of a redundant entry.
 func (b *Batch) Queue(query string, arguments ...any) *QueuedQuery {
-	lastQuery * QueuedQuery := nil
+	var lastQuery *QueuedQuery = nil
 
 	if len(b.QueuedQueries) > 0 {
 		lastQuery = b.QueuedQueries[len(b.QueuedQueries)-1]
