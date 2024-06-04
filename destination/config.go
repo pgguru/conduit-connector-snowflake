@@ -30,7 +30,7 @@ type TableFn func(sdk.Record) (string, error)
 
 type Config struct {
 	// URL is the connection string for the upstream database.
-	Connection string `json:"url" validate:"required"`
+	URL string `json:"url" validate:"required"`
 	// Table is used as the target table into which records are inserted.
 	Table string `json:"table" default:"{{ index .Metadata \"opencdc.collection\" }}"`
 	// Key represents the column name for the key used to identify and update existing rows.

@@ -64,7 +64,7 @@ func (d *Destination) Configure(_ context.Context, cfg map[string]string) error 
 // Open prepare the plugin to start writing records from the given position.
 func (d *Destination) Open(ctx context.Context) error {
 	// Create storage.
-	s, err := repository.Create(ctx, d.config.Connection)
+	s, err := repository.Create(ctx, d.config.URL)
 	if err != nil {
 		return fmt.Errorf("error on repo creation: %w", err)
 	}
