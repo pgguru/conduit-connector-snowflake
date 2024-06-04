@@ -26,6 +26,7 @@ import (
 
 	_ "github.com/snowflakedb/gosnowflake" //nolint:revive,nolintlint
 
+	"github.com/conduitio-labs/conduit-connector-snowflake/destination"
 	"github.com/conduitio-labs/conduit-connector-snowflake/source/position"
 )
 
@@ -386,4 +387,25 @@ func buildAddTimestampColumn(table, column string) string {
 
 func isNil(v interface{}) bool {
 	return v == nil || (reflect.ValueOf(v).Kind() == reflect.Ptr && reflect.ValueOf(v).IsNil())
+}
+
+func (s *Snowflake) SendBatch(ctx context.Context, batch *destination.Batch) destination.BatchResults {
+	// get ready for handling
+	batch.PrepareBatch(ctx)
+
+	for _, q := range b.QueuedQueries {
+		s.ExecContext(ctx, q.SQL, q.Arguments...)
+	}
+	return &batchResults{}
+}
+
+type batchResults struct {
+}
+
+func (br *batchResults) Close() error {
+	return nil
+}
+
+func (br *batchResults) Exec() error {
+	return nil
 }

@@ -1,78 +1,14 @@
 package destination
 
-import (
-	"context"
-	"errors"
-	"fmt"
-)
-
-type Pipeline struct{}
-type CommandTag struct{}
-type tracer struct {
-	TraceBatchQuery func(context.Context, *Conn, TraceBatchQueryData)
-}
-type Conn struct {
-	batchTracer *tracer
-}
-type TraceBatchQueryData struct {
-	SQL  string
-	Args []any
-	Err  error
-}
-type FieldDescription struct{}
-type ResultReader struct {
-	Close func() (CommandTag, error)
-}
-type MultiResultReader struct {
-	Close        func() error
-	NextResult   func() bool
-	ResultReader func() ResultReader
-}
-
-// QueuedQuery is a query that has been queued for execution via a Batch.
+// Our QueuedQuery interface will be a SQL query and a list of record arguments.
+// When we create a new Batch record, we see if the query is the same as the
+// previous one, and if so, append the arguments to the existing record in order
+// to ensure we have bulk append capabilities.
+//
+// If the SQL is different, then we just create a new entry
 type QueuedQuery struct {
 	SQL       string
-	Arguments []any
-	Fn        batchItemFunc
-	// sd        *pgconn.StatementDescription
-}
-
-type batchItemFunc func(br BatchResults) error
-
-// Query sets fn to be called when the response to qq is received.
-func (qq *QueuedQuery) Query(fn func(rows Rows) error) {
-	qq.Fn = func(br BatchResults) error {
-		rows, _ := br.Query()
-		defer rows.Close()
-
-		err := fn(rows)
-		if err != nil {
-			return err
-		}
-		rows.Close()
-
-		return rows.Err()
-	}
-}
-
-// Query sets fn to be called when the response to qq is received.
-func (qq *QueuedQuery) QueryRow(fn func(row Row) error) {
-	qq.Fn = func(br BatchResults) error {
-		row := br.QueryRow()
-		return fn(row)
-	}
-}
-
-// Exec sets fn to be called when the response to qq is received.
-func (qq *QueuedQuery) Exec(fn func(ct CommandTag) error) {
-	qq.Fn = func(br BatchResults) error {
-		ct, err := br.Exec()
-		if err != nil {
-			return err
-		}
-
-		return fn(ct)
-	}
+	Arguments [][]any
 }
 
 // Batch queries are a way of bundling multiple queries together to avoid
@@ -81,16 +17,26 @@ type Batch struct {
 	QueuedQueries []*QueuedQuery
 }
 
-// Queue queues a query to batch b. query can be an SQL query or the name of a prepared statement.
-// The only pgx option argument that is supported is QueryRewriter. Queries are executed using the
-// connection's DefaultQueryExecMode.
+// Queue queues a query to batch b. query can be an SQL query or the name of a
+// prepared statement.  If the statement matches the last one, we append the
+// arguments list to this one instead of a redundant entry.
 func (b *Batch) Queue(query string, arguments ...any) *QueuedQuery {
-	qq := &QueuedQuery{
-		SQL:       query,
-		Arguments: arguments,
+	lastQuery * QueuedQuery := nil
+
+	if len(b.QueuedQueries) > 0 {
+		lastQuery = b.QueuedQueries[len(b.QueuedQueries)-1]
 	}
-	b.QueuedQueries = append(b.QueuedQueries, qq)
-	return qq
+
+	if lastQuery != nil {
+		lastQuery.Arguments = append(lastQuery.Arugments, arguments)
+	} else {
+		qq := &QueuedQuery{
+			SQL:       query,
+			Arguments: {arguments},
+		}
+		b.QueuedQueries = append(b.QueuedQueries, qq)
+	}
+	return nil
 }
 
 // Len returns number of queries that have been queued so far.
@@ -99,187 +45,37 @@ func (b *Batch) Len() int {
 }
 
 type BatchResults interface {
-	// Exec reads the results from the next query in the batch as if the query has been sent with Conn.Exec. Prefer
-	// calling Exec on the QueuedQuery.
-	Exec() (CommandTag, error)
-
-	// Query reads the results from the next query in the batch as if the query has been sent with Conn.Query. Prefer
-	// calling Query on the QueuedQuery.
-	Query() (Rows, error)
-
-	// QueryRow reads the results from the next query in the batch as if the query has been sent with Conn.QueryRow.
-	// Prefer calling QueryRow on the QueuedQuery.
-	QueryRow() Row
-
-	// Close closes the batch operation. All unread results are read and any callback functions registered with
-	// QueuedQuery.Query, QueuedQuery.QueryRow, or QueuedQuery.Exec will be called. If a callback function returns an
-	// error or the batch encounters an error subsequent callback functions will not be called.
-	//
-	// Close must be called before the underlying connection can be used again. Any error that occurred during a batch
-	// operation may have made it impossible to resyncronize the connection with the server. In this case the underlying
-	// connection will have been closed.
-	//
-	// Close is safe to call multiple times. If it returns an error subsequent calls will return the same error. Callback
-	// functions will not be rerun.
 	Close() error
+	Exec() error
 }
 
-type batchResults struct {
-	ctx       context.Context
-	conn      *Conn
-	mrr       *MultiResultReader
-	err       error
-	b         *Batch
-	qqIdx     int
-	closed    bool
-	endTraced bool
-}
+// br := d.conn.SendBatch(ctx, b)
+// defer br.Close()
 
-// Exec reads the results from the next query in the batch as if the query has been sent with Exec.
-func (br *batchResults) Exec() (CommandTag, error) {
-	if br.err != nil {
-		return CommandTag{}, br.err
-	}
-	if br.closed {
-		return CommandTag{}, fmt.Errorf("batch already closed")
+func pivot(matrix [][]any) [][]any {
+	if len(matrix) == 0 {
+		return [][]any{}
 	}
 
-	query, arguments, _ := br.nextQueryAndArgs()
+	rowCount := len(matrix)
+	colCount := len(matrix[0])
+	result := make([][]any, colCount)
 
-	if !br.mrr.NextResult() {
-		err := br.mrr.Close()
-		if err == nil {
-			err = errors.New("no result")
-		}
-		if br.conn.batchTracer != nil {
-			br.conn.batchTracer.TraceBatchQuery(br.ctx, br.conn, TraceBatchQueryData{
-				SQL:  query,
-				Args: arguments,
-				Err:  err,
-			})
-		}
-		return CommandTag{}, err
+	for i := range result {
+		result[i] = make([]any, rowCount)
 	}
 
-	commandTag, err := br.mrr.ResultReader().Close()
-	if err != nil {
-		br.err = err
-		br.mrr.Close()
-	}
-
-	// if br.conn.batchTracer != nil {
-	// 	br.conn.batchTracer.TraceBatchQuery(br.ctx, br.conn, TraceBatchQueryData{
-	// 		SQL:        query,
-	// 		Args:       arguments,
-	// 		CommandTag: commandTag,
-	// 		Err:        br.err,
-	// 	})
-	// }
-
-	return commandTag, br.err
-}
-
-// Query reads the results from the next query in the batch as if the query has been sent with Query.
-func (br *batchResults) Query() (Rows, error) {
-	query, arguments, ok := br.nextQueryAndArgs()
-	if !ok {
-		query = "batch query"
-	}
-
-	if br.err != nil {
-		return &baseRows{err: br.err, closed: true}, br.err
-	}
-
-	if br.closed {
-		alreadyClosedErr := fmt.Errorf("batch already closed")
-		return &baseRows{err: alreadyClosedErr, closed: true}, alreadyClosedErr
-	}
-
-	rows := br.getRows(br.ctx, query, arguments)
-	rows.batchTracer = nil //br.conn.batchTracer
-
-	if !br.mrr.NextResult() {
-		rows.err = br.mrr.Close()
-		if rows.err == nil {
-			rows.err = errors.New("no result")
-		}
-		rows.closed = true
-
-		if br.conn.batchTracer != nil {
-			br.conn.batchTracer.TraceBatchQuery(br.ctx, br.conn, TraceBatchQueryData{
-				SQL:  query,
-				Args: arguments,
-				Err:  rows.err,
-			})
-		}
-
-		return rows, rows.err
-	}
-
-	rows.resultReader = br.mrr.ResultReader()
-	return rows, nil
-}
-
-// QueryRow reads the results from the next query in the batch as if the query has been sent with QueryRow.
-func (br *batchResults) QueryRow() Row {
-	rows, _ := br.Query()
-	return (*connRow)(rows.(*baseRows))
-
-}
-
-// Close closes the batch operation. Any error that occurred during a batch operation may have made it impossible to
-// resyncronize the connection with the server. In this case the underlying connection will have been closed.
-func (br *batchResults) Close() error {
-	defer func() {
-		if !br.endTraced {
-			if br.conn != nil && br.conn.batchTracer != nil {
-				br.conn.batchTracer.TraceBatchEnd(br.ctx, br.conn, TraceBatchEndData{Err: br.err})
-			}
-			br.endTraced = true
-		}
-	}()
-
-	if br.err != nil {
-		return br.err
-	}
-
-	if br.closed {
-		return nil
-	}
-
-	// Read and run fn for all remaining items
-	for br.err == nil && !br.closed && br.b != nil && br.qqIdx < len(br.b.QueuedQueries) {
-		if br.b.QueuedQueries[br.qqIdx].Fn != nil {
-			err := br.b.QueuedQueries[br.qqIdx].Fn(br)
-			if err != nil {
-				br.err = err
-			}
-		} else {
-			br.Exec()
+	for i := 0; i < rowCount; i++ {
+		for j := 0; j < colCount; j++ {
+			result[j][i] = matrix[i][j]
 		}
 	}
 
-	br.closed = true
-
-	err := br.mrr.Close()
-	if br.err == nil {
-		br.err = err
-	}
-
-	return br.err
+	return result
 }
 
-func (br *batchResults) earlyError() error {
-	return br.err
-}
-
-func (br *batchResults) nextQueryAndArgs() (query string, args []any, ok bool) {
-	if br.b != nil && br.qqIdx < len(br.b.QueuedQueries) {
-		bi := br.b.QueuedQueries[br.qqIdx]
-		query = bi.SQL
-		args = bi.Arguments
-		ok = true
-		br.qqIdx++
+func (b *Batch) PrepareBatch(ctx) {
+	for _, query := range b.QueuedQueries {
+		query.Arguments = pivot(query.Arguments)
 	}
-	return
 }

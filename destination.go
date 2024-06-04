@@ -64,7 +64,7 @@ func (d *Destination) Configure(_ context.Context, cfg map[string]string) error 
 // Open prepare the plugin to start writing records from the given position.
 func (d *Destination) Open(ctx context.Context) error {
 	// Create storage.
-	s, err := repository.Create(ctx, d.config.Connection)
+	s, err := repository.Create(ctx, d.config.URL)
 	if err != nil {
 		return fmt.Errorf("error on repo creation: %w", err)
 	}
@@ -101,7 +101,7 @@ func (d *Destination) Write(ctx context.Context, recs []sdk.Record) (int, error)
 
 	for i := range recs {
 		// fetch error for each statement
-		_, err := br.Exec()
+		err := br.Exec()
 		if err != nil {
 			// the batch is executed in a transaction, if one failed all failed
 			return 0, fmt.Errorf("failed to execute query for record %d: %w", i, err)
@@ -112,7 +112,7 @@ func (d *Destination) Write(ctx context.Context, recs []sdk.Record) (int, error)
 
 func (d *Destination) Teardown(ctx context.Context) error {
 	if d.conn != nil {
-		return d.conn.Close(ctx)
+		return d.conn.Close()
 	}
 	return nil
 }
