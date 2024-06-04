@@ -28,12 +28,12 @@ func (b *Batch) Queue(query string, arguments ...any) *QueuedQuery {
 	}
 
 	if lastQuery != nil {
-		lastQuery.Arguments = append(lastQuery.Arugments, arguments)
+		lastQuery.Arguments = append(lastQuery.Arguments, arguments)
 	} else {
 		qq := &QueuedQuery{
-			SQL:       query,
-			Arguments: {arguments},
+			SQL: query,
 		}
+		qq.Arguments = append(qq.Arguments, arguments)
 		b.QueuedQueries = append(b.QueuedQueries, qq)
 	}
 	return nil
@@ -74,7 +74,7 @@ func pivot(matrix [][]any) [][]any {
 	return result
 }
 
-func (b *Batch) PrepareBatch(ctx) {
+func (b *Batch) PrepareBatch() {
 	for _, query := range b.QueuedQueries {
 		query.Arguments = pivot(query.Arguments)
 	}

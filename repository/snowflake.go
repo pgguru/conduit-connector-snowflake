@@ -391,10 +391,10 @@ func isNil(v interface{}) bool {
 
 func (s *Snowflake) SendBatch(ctx context.Context, batch *destination.Batch) destination.BatchResults {
 	// get ready for handling
-	batch.PrepareBatch(ctx)
+	batch.PrepareBatch()
 
-	for _, q := range b.QueuedQueries {
-		s.ExecContext(ctx, q.SQL, q.Arguments...)
+	for _, q := range batch.QueuedQueries {
+		s.ExecContext(ctx, q.SQL, q.Arguments)
 	}
 	return &batchResults{}
 }
