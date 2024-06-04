@@ -21,9 +21,9 @@ func (Config) Parameters() map[string]sdk.Parameter {
 			Type:        sdk.ParameterTypeString,
 			Validations: []sdk.Validation{},
 		},
-		"url": {
+		"connection": {
 			Default:     "",
-			Description: "url is the connection string for the Snowflake database.",
+			Description: "connection is the connection string for the Snowflake database.",
 			Type:        sdk.ParameterTypeString,
 			Validations: []sdk.Validation{
 				sdk.ValidationRequired{},
