@@ -19,8 +19,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/conduitio-labs/conduit-connector-snowflake/destination/compress"
@@ -49,6 +49,7 @@ type SnowflakeCSV struct {
 	PrimaryKey        string
 	Stage             string
 	TableName         string
+	Schema            map[string]string
 	FileThreads       int
 	ProcessingWorkers int
 
@@ -130,6 +131,7 @@ func NewCSV(ctx context.Context, cfg *SnowflakeConfig) (*SnowflakeCSV, error) {
 		PrimaryKey:        cfg.PrimaryKey,
 		Stage:             cfg.Stage,
 		TableName:         cfg.TableName,
+		Schema:            LoadExternalSchema(cfg.TableName),
 		ProcessingWorkers: cfg.ProcessingWorkers,
 		FileThreads:       cfg.FileThreads,
 		db:                db,
@@ -186,8 +188,7 @@ func (s *SnowflakeCSV) Write(ctx context.Context, records []sdk.Record) (int, er
 	sdk.Logger(ctx).Debug().Msgf("payload.after=%+v", records[0].Payload.After)
 	sdk.Logger(ctx).Debug().Msgf("key=%+v", records[0].Key)
 	// extract schema from payload
-	schema := make(map[string]string)
-	s.PopulateInitialSchema(schema, s.TableName)
+	schema := s.Schema
 	csvColumnOrder, meroxaColumns, err := format.GetDataSchema(ctx, records, schema, s.Prefix)
 	if err != nil {
 		sdk.Logger(ctx).Err(err).Msg("failed to convert records to CSV")
@@ -651,81 +652,22 @@ func buildSchema(schema map[string]string, columnOrder []string) string {
 	return strings.Join(cols, ", ")
 }
 
+type serializedSchema map[string]map[string][]string
+
 // functionality test hack
-func (s *SnowflakeCSV) PopulateInitialSchema(schema map[string]string, tablename string) {
+func (s *SnowflakeCSV) LoadSchema(tablename string) map[string]string {
 	// generated using:
 	// perl -MJSON -le 'while (<>) { s/\s//g; @a=split/\|/; push @{($out{$a[1]} //= [])}, $a[0];} print JSON::encode_json(\%out)' | jq . | tr [] {}
 	// TODO: lazy-load this map from generated files per table
-	data := map[string]map[string][]string{
-		"missions": {
-			"NUMBER": {
-				"account_id",
-				"creator_id",
-				"duration_limit",
-				"id",
-				"latest_picture_id",
-				"latest_video_id",
-				"launcher_id",
-				"project_id",
-				"scout_agreement_id",
-				"scout_completes",
-				"scouts_count",
-				"scouts_limit",
-				"template_id",
-				"total_days",
-				"total_snippets",
-			},
-			"VARCHAR": {
-				"access_token",
-				"billboard",
-				"category",
-				"description",
-				"instructions",
-				"invite_message",
-				"job_code",
-				"locale",
-				"name",
-				"overview",
-				"part_mode",
-				"reward",
-				"reward_type",
-				"status",
-				"template_type",
-			},
-			"VARIANT": {
-				"billboard_data",
-				"original_language_statuses",
-				"profile_options",
-				"skipped_validations",
-				"template_config",
-				"template_variables",
-				"translated_fields",
-				"translation_language_statuses",
-			},
-			"TIMESTAMP_LTZ": {
-				"closed_at",
-				"created_at",
-				"data_deleted_at",
-				"launched_at",
-				"paid_at",
-				"updated_at",
-			},
-			"BOOLEAN": {
-				"auto_transcribe",
-				"custom_billboard",
-				"custom_branding",
-				"legacy_tags",
-				"paid_by_dscout",
-				"perform_ai_analysis",
-				"require_profile",
-				"template",
-				"translation_mode",
-				"used_as_intro",
-			},
-		},
-	}
 
-	if cols, ok := data[tablename]; ok {
+	schema := make(map[string]string)
+
+	rawdata, _ = ioutil.ReadFile("schema.yml")
+
+	var data serializedSchema
+	err := yaml.Unmarshal(rawdata, &data)
+
+	if cols, ok := schema[tablename]; ok {
 		for datatype, fields := range cols {
 			for _, field := range fields {
 				schema[field] = datatype
