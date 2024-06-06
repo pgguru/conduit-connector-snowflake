@@ -307,7 +307,15 @@ func createCSVRecords(
 			case data[c] == nil:
 				row[j] = ""
 			default:
-				row[j] = fmt.Sprint(data[c])
+				// TODO: switch type things; if variant
+				v := reflect.ValueOf(data[c])
+				switch v.Kind() {
+				case reflect.Map:
+					jsonData, _ := json.Marshal(data[c])
+					row[j] = jsonData
+				default:
+					row[j] = fmt.Sprint(data[c])
+				}
 			}
 		}
 
