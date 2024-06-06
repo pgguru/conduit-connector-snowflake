@@ -608,8 +608,26 @@ func (s *SnowflakeCSV) buildSetList(table1, table2 string, cols []string, mode s
 
 func buildSelectMerge(cols []string) string {
 	ret := make([]string, len(cols))
+
+	variantTypes := map[string]struct{}{
+		"billboard_data":                struct{},
+		"original_language_statuses":    struct{},
+		"profile_options":               struct{},
+		"skipped_validations":           struct{},
+		"template_config":               struct{},
+		"template_variables":            struct{},
+		"translated_fields":             struct{},
+		"translation_language_statuses": struct{},
+	}
+
 	for i, colName := range cols {
-		ret[i] = fmt.Sprintf("$%d %s", i+1, colName)
+		// special type handling for variant types; hack for now
+
+		if _, ok := variantTypes[colName]; ok {
+			ret[i] = fmt.Sprintf("parse_json($%d) %s", i+1, colName)
+		} else {
+			ret[i] = fmt.Sprintf("$%d %s", i+1, colName)
+		}
 	}
 
 	return strings.Join(ret, ", ")
