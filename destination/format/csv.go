@@ -20,8 +20,11 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/go-errors/errors"
@@ -309,12 +312,74 @@ func createCSVRecords(
 			default:
 				// TODO: switch type things; if variant
 				v := reflect.ValueOf(data[c])
-				switch v.Kind() {
+				switch kind := v.Kind(); kind {
 				case reflect.Map:
 					jsonData, _ := json.Marshal(data[c])
-					row[j] = jsonData
+					row[j] = string(jsonData)
+				case reflect.Slice:
+					// Check if the slice elements are maps
+					jsonData, _ := json.Marshal(data[c])
+					row[j] = string(jsonData)
+
+					//if v.Len() > 0 {
+					//	elemType := v.Index(0).Kind()
+					//	if elemType == reflect.Map {
+					//		// json array
+					//		jsonData, _ := json.Marshal(data[c])
+					//		row[j] = string(jsonData)
+					//	} else {
+					//		// Handle other slice element types
+					//		row[j] = fmt.Sprintf("%v", data[c])
+					//	}
+					//} else {
+					//	// Handle empty slice
+					//	row[j] = "[]"
+					//}
+
+					//elemType := v.Type().Elem()
+					//if elemType.Kind() == reflect.Map {
+					//	fmt.Printf("XXXXX JSON ARRAY got elemType %+v for slice %T %v\n", elemType, elemType, reflect.ValueOf(elemType).Kind())
+					//	// json array
+					//	jsonData, _ := json.Marshal(data[c])
+					//	row[j] = string(jsonData)
+					//} else {
+					//	// TODO: need to descend into elements, really, in order to format things properly
+					//	fmt.Printf("XXXXX other slice got elemType %+v for slice %T %v\n", elemType, elemType, reflect.ValueOf(elemType).Kind())
+					//	row[j] = fmt.Sprintf("%v",data[c])
+					//}
 				default:
-					row[j] = fmt.Sprint(data[c])
+					switch dat := data[c].(type) {
+					case string:
+						if strings.HasPrefix(dat, "20") {
+							layout := "2006-01-02 15:04:05.000000 -0700 MST"
+							parsedTime, err := time.Parse(layout, dat)
+
+							if err != nil {
+								layout = "2006-01-02 15:04:05 -0700 MST"
+								parsedTime, err = time.Parse(layout, dat)
+							}
+
+							if err == nil {
+								row[j] = parsedTime.Format("2006-01-02 15:04:05.000 -07:00")
+							} else {
+								fmt.Printf("XXXX possible unparsed time: %s", dat)
+								row[j] = dat
+							}
+						} else {
+							row[j] = dat
+						}
+					default:
+						row[j] = fmt.Sprint(data[c])
+					}
+					//fmt.Printf("XXXXX unknown kind: %+v\n", kind)
+					//switch mytype := reflect.TypeOf(data[c]); mytype {
+					//case reflect.TypeOf(time.Time{}):
+					//	fmt.Printf("XXXXX got time!\n")
+					//	row[j] = data[c].(time.Time).Format(time.RFC3339)
+					//default:
+					//	//fmt.Printf("XXXXX unknown type: %+v, %T, %+v, %T\n", mytype, mytype, data[c], data[c])
+					//	row[j] = fmt.Sprint(data[c])
+					//}
 				}
 			}
 		}
