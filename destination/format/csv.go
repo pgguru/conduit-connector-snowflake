@@ -65,12 +65,17 @@ func GetDataSchema(
 		deletedAtColumn: fmt.Sprintf("%s_deleted_at", prefix),
 	}
 
+	csvColumnOrder := []string{}
+	for key := range schema {
+		csvColumnOrder = append(csvColumnOrder, key)
+	}
+
+	sort.Strings(csvColumnOrder)
+
 	schema[connectorColumns.operationColumn] = snowflakeVarchar
 	schema[connectorColumns.createdAtColumn] = snowflakeTimeStamp
 	schema[connectorColumns.updatedAtColumn] = snowflakeTimeStamp
 	schema[connectorColumns.deletedAtColumn] = snowflakeTimeStamp
-
-	csvColumnOrder := []string{}
 
 	// TODO: see whether we need to support a compound key here
 	// TODO: what if the key field changes? e.g. from `id` to `name`? we need to think about this
