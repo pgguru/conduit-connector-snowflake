@@ -70,10 +70,15 @@ func GetDataSchema(
 
 	csvColumnOrder := []string{}
 	for key := range schema {
-		csvColumnOrder = append(csvColumnOrder, key)
+		switch key {
+		case connectorColumns.operationColumn:
+		case connectorColumns.createdAtColumn:
+		case connectorColumns.updatedAtColumn:
+		case connectorColumns.deletedAtColumn:
+		default:
+			csvColumnOrder = append(csvColumnOrder, key)
+		}
 	}
-
-	sort.Strings(csvColumnOrder)
 
 	schema[connectorColumns.operationColumn] = snowflakeVarchar
 	schema[connectorColumns.createdAtColumn] = snowflakeTimeStamp

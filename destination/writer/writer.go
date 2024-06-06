@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ import (
 	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/go-errors/errors"
 	sf "github.com/snowflakedb/gosnowflake"
+	yaml "gopkg.in/yaml.v2"
 )
 
 const (
@@ -187,7 +189,7 @@ func (s *SnowflakeCSV) Write(ctx context.Context, records []sdk.Record) (int, er
 	sdk.Logger(ctx).Debug().Msgf("payload.before=%+v", records[0].Payload.Before)
 	sdk.Logger(ctx).Debug().Msgf("payload.after=%+v", records[0].Payload.After)
 	sdk.Logger(ctx).Debug().Msgf("key=%+v", records[0].Key)
-	// extract schema from payload
+	// extract schema from payload based on overloaded columns
 	schema := s.Schema
 	csvColumnOrder, meroxaColumns, err := format.GetDataSchema(ctx, records, schema, s.Prefix)
 	if err != nil {
@@ -655,23 +657,33 @@ func buildSchema(schema map[string]string, columnOrder []string) string {
 type serializedSchema map[string]map[string][]string
 
 // functionality test hack
-func (s *SnowflakeCSV) LoadSchema(tablename string) map[string]string {
+func LoadExternalSchema(tablename string) map[string]string {
 	// generated using:
 	// perl -MJSON -le 'while (<>) { s/\s//g; @a=split/\|/; push @{($out{$a[1]} //= [])}, $a[0];} print JSON::encode_json(\%out)' | jq . | tr [] {}
 	// TODO: lazy-load this map from generated files per table
 
 	schema := make(map[string]string)
 
-	rawdata, _ = ioutil.ReadFile("schema.yml")
+	rawdata, err := ioutil.ReadFile("schema.yml")
+
+	if err != nil {
+		panic(err)
+	}
 
 	var data serializedSchema
-	err := yaml.Unmarshal(rawdata, &data)
+	err = yaml.Unmarshal(rawdata, &data)
 
-	if cols, ok := schema[tablename]; ok {
+	if err != nil {
+		panic(err)
+	}
+
+	if cols, ok := data[tablename]; ok {
 		for datatype, fields := range cols {
 			for _, field := range fields {
 				schema[field] = datatype
 			}
 		}
 	}
+	fmt.Printf("XXXXXXX: loaded external schema: %+v", schema)
+	return schema
 }
