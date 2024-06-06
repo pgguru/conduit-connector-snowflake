@@ -610,14 +610,14 @@ func buildSelectMerge(cols []string) string {
 	ret := make([]string, len(cols))
 
 	variantTypes := map[string]struct{}{
-		"billboard_data":                struct{},
-		"original_language_statuses":    struct{},
-		"profile_options":               struct{},
-		"skipped_validations":           struct{},
-		"template_config":               struct{},
-		"template_variables":            struct{},
-		"translated_fields":             struct{},
-		"translation_language_statuses": struct{},
+		"billboard_data":                {},
+		"original_language_statuses":    {},
+		"profile_options":               {},
+		"skipped_validations":           {},
+		"template_config":               {},
+		"template_variables":            {},
+		"translated_fields":             {},
+		"translation_language_statuses": {},
 	}
 
 	for i, colName := range cols {
