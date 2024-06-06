@@ -32,7 +32,7 @@ const (
 	snowflakeTimeStamp = "TIMESTAMP_LTZ"
 	snowflakeVarchar   = "VARCHAR"
 	snowflakeVariant   = "VARIANT"
-	snowflakeInteger   = "INTEGER"
+	snowflakeInteger   = "NUMBER"
 	snowflakeBoolean   = "BOOLEAN"
 	snowflakeFloat     = "FLOAT"
 )

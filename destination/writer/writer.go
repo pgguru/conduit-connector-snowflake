@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"os"
 	"time"
 
 	"github.com/conduitio-labs/conduit-connector-snowflake/destination/compress"
@@ -390,6 +391,11 @@ func (s *SnowflakeCSV) upload(ctx context.Context, filename string, buf *bytes.B
 	start := time.Now()
 	sizein := buf.Len()
 
+	localFile, _ := os.Create(fmt.Sprintf("/tmp/%s", filename))
+	defer localFile.Close()
+
+	localFile.Write(buf.Bytes())
+
 	if err := s.compressor.Compress(buf, s.compressedBuf); err != nil {
 		return errors.Errorf("failed to compress buffer: %w", err)
 	}
@@ -652,7 +658,7 @@ func (s *SnowflakeCSV) PopulateInitialSchema(schema map[string]string, tablename
 	// TODO: lazy-load this map from generated files per table
 	data := map[string]map[string][]string{
 		"missions": {
-			"INTEGER": {
+			"NUMBER": {
 				"account_id",
 				"creator_id",
 				"duration_limit",
