@@ -341,7 +341,7 @@ func createCSVRecords(
 							if err == nil {
 								row[j] = parsedTime.Format("2006-01-02 15:04:05.000 -07:00")
 							} else {
-								fmt.Printf("XXXX possible unparsed time: %s", dat)
+								// fmt.Printf("XXXX possible unparsed time: %s", dat)
 								row[j] = dat
 							}
 						} else {

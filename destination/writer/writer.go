@@ -684,6 +684,6 @@ func LoadExternalSchema(tablename string) map[string]string {
 			}
 		}
 	}
-	fmt.Printf("XXXXXXX: loaded external schema: %+v", schema)
+	// fmt.Printf("XXXXXXX: loaded external schema: %+v", schema)
 	return schema
 }
