@@ -20,7 +20,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io/ioutil"
-	"os"
+	//"os"
 	"strings"
 	"time"
 
@@ -394,10 +394,10 @@ func (s *SnowflakeCSV) upload(ctx context.Context, filename string, buf *bytes.B
 	start := time.Now()
 	sizein := buf.Len()
 
-	localFile, _ := os.Create(fmt.Sprintf("/tmp/%s", filename))
-	defer localFile.Close()
-
-	localFile.Write(buf.Bytes())
+//	localFile, _ := os.Create(fmt.Sprintf("/tmp/%s", filename))
+//	defer localFile.Close()
+//
+//	localFile.Write(buf.Bytes())
 
 	if err := s.compressor.Compress(buf, s.compressedBuf); err != nil {
 		return errors.Errorf("failed to compress buffer: %w", err)
