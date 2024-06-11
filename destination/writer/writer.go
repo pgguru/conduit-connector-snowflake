@@ -647,7 +647,7 @@ func buildSchema(schema map[string]string, columnOrder []string) string {
 
 	// we use the column order to make the query string determinstic
 	for i, colName := range columnOrder {
-		sqlType := schema[colName]
+		sqlType := schema[strings.ToLower(colName)]
 		cols[i] = strings.Join([]string{colName, sqlType}, " ")
 	}
 
@@ -680,7 +680,7 @@ func LoadExternalSchema(tablename string) map[string]string {
 	if cols, ok := data[tablename]; ok {
 		for datatype, fields := range cols {
 			for _, field := range fields {
-				schema[field] = datatype
+				schema[strings.ToLower(field)] = datatype
 			}
 		}
 	}

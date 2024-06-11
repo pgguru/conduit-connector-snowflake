@@ -101,6 +101,7 @@ func GetDataSchema(
 	}
 
 	for key, val := range data {
+		key = strings.ToLower(key)
 		if schema[key] == "" {
 			csvColumnOrder = append(csvColumnOrder, key)
 			switch val.(type) {
