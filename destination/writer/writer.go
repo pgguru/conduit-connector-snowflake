@@ -204,10 +204,17 @@ func (s *SnowflakeCSV) Write(ctx context.Context, records []sdk.Record) (int, er
 		return 0, errors.Errorf("failed to checking table %q on snowflake: %w", s.TableName, err)
 	}
 
+	// assign column types per column index
+	csvColumnTypes := make([]string, len(csvColumnOrder))
+	for i, colName := range csvColumnOrder {
+		csvColumnTypes[i] = schema[colName]
+	}
+
 	err = format.MakeCSVBytes(
 		ctx,
 		records,
 		csvColumnOrder,
+		csvColumnTypes,
 		*meroxaColumns,
 		s.PrimaryKey,
 		s.insertsBuf,
@@ -394,10 +401,10 @@ func (s *SnowflakeCSV) upload(ctx context.Context, filename string, buf *bytes.B
 	start := time.Now()
 	sizein := buf.Len()
 
-//	localFile, _ := os.Create(fmt.Sprintf("/tmp/%s", filename))
-//	defer localFile.Close()
-//
-//	localFile.Write(buf.Bytes())
+	//	localFile, _ := os.Create(fmt.Sprintf("/tmp/%s", filename))
+	//	defer localFile.Close()
+	//
+	//	localFile.Write(buf.Bytes())
 
 	if err := s.compressor.Compress(buf, s.compressedBuf); err != nil {
 		return errors.Errorf("failed to compress buffer: %w", err)

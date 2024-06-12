@@ -20,7 +20,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -144,6 +143,7 @@ func MakeCSVBytes(
 	ctx context.Context,
 	records []sdk.Record,
 	csvColumnOrder []string,
+	csvColumnTypes []string,
 	meroxaColumns ConnectorColumns,
 	primaryKey string,
 	insertsBuf *bytes.Buffer,
@@ -220,6 +220,7 @@ func MakeCSVBytes(
 				insertW,
 				updateW,
 				csvColumnOrder,
+				csvColumnTypes,
 				meroxaColumns)
 			if err != nil {
 				errChan <- errors.Errorf("failed to create CSV records: %w", err)
@@ -286,6 +287,7 @@ func createCSVRecords(
 	recordSummaries []*recordSummary,
 	insertsWriter, updatesWriter *csv.Writer,
 	csvColumnOrder []string,
+	csvColumnTypes []string,
 	m ConnectorColumns,
 ) (numInserts int, numUpdates int, err error) {
 	var inserts, updates [][]string
@@ -316,41 +318,28 @@ func createCSVRecords(
 			case data[c] == nil:
 				row[j] = ""
 			default:
-				// check for special handling based on source type; maybe we move some of this to column type map handling
-				v := reflect.ValueOf(data[c])
-				switch kind := v.Kind(); kind {
-				case reflect.Map:
+				// switch our representation based on type
+				switch csvColumnTypes[j] {
+				case "VARIANT":
 					jsonData, _ := json.Marshal(data[c])
 					row[j] = string(jsonData)
-				case reflect.Slice:
-					// TODO: check if the slice elements are maps; right now we assume it's JSON
-					jsonData, _ := json.Marshal(data[c])
-					row[j] = string(jsonData)
-				default:
-					switch dat := data[c].(type) {
-					case string:
-						// TODO: this hack only works for recent dates, but avoids trying to parse every data field
-						if strings.HasPrefix(dat, "20") {
-							layout := "2006-01-02 15:04:05.000000 -0700 MST"
-							parsedTime, err := time.Parse(layout, dat)
+				case "TIMESTAMP_LTZ", "TIMESTAMP_TZ":
+					layout := "2006-01-02 15:04:05.000000 -0700 MST"
+					dat := data[c].(string)
+					parsedTime, err := time.Parse(layout, dat)
 
-							if err != nil {
-								layout = "2006-01-02 15:04:05 -0700 MST"
-								parsedTime, err = time.Parse(layout, dat)
-							}
-
-							if err == nil {
-								row[j] = parsedTime.Format("2006-01-02 15:04:05.000 -07:00")
-							} else {
-								// fmt.Printf("XXXX possible unparsed time: %s", dat)
-								row[j] = dat
-							}
-						} else {
-							row[j] = dat
-						}
-					default:
-						row[j] = fmt.Sprint(data[c])
+					if err != nil {
+						layout = "2006-01-02 15:04:05 -0700 MST"
+						parsedTime, err = time.Parse(layout, dat)
 					}
+					if err == nil {
+						row[j] = parsedTime.Format("2006-01-02 15:04:05.000 -07:00")
+					} else {
+						// fmt.Printf("XXXX possible unparsed time: %s", dat)
+						row[j] = dat
+					}
+				default:
+					row[j] = fmt.Sprint(data[c])
 				}
 			}
 		}
